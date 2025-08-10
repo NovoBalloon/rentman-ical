@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# Rentman Projects iCal transformer
-# - Hardcoded source URL (no env needed)
-# - Overwrite DTSTART/DTEND with Usage times when detectable
-# - Add [Confirmed]/[Pending]/[Cancelled] to SUMMARY
-# - Set STATUS accordingly
+# Split Rentman Projects ICS into two calendars:
+# - Confirmed events  -> rentman_confirmed.ics
+# - Pending/Option    -> rentman_pending.ics
+# Also tries to override DTSTART/DTEND with "Usage" times when detectable.
 
 import re
 import requests
@@ -11,14 +10,20 @@ from icalendar import Calendar, Event, vText
 from datetime import datetime, date, time, timezone
 import pytz
 
-# --------- CONFIG (hardcoded) ----------
+# --------- CONFIG ----------
 RENTMAN_ICAL_URL = (
     "https://novolightingltd.sync.rentman.eu/ical.php?c=ap&i=33&t=hnAroMIDTw6eRlic8VZTa7tc1YVOgrCNTMC6tmD3gg4%3D%3A%3A%3Aef8c8108db57083c98a9fa98%3A%3A%3A"
     "52a43e6f375c6e78589ede917e39542c"
 )
-OUTPUT_ICS = "rentman_usage_calendar.ics"
 TZID = "America/Vancouver"
 TZ = pytz.timezone(TZID)
+
+OUT_CONFIRMED = "rentman_confirmed.ics"
+OUT_PENDING   = "rentman_pending.ics"
+
+# (Optional) calendar color hints – many apps ignore ICS color; set color in the app UI.
+APPLE_GREEN  = "#33CC33"
+APPLE_YELLOW = "#FFCC00"
 
 # --------- STATUS DETECTION ----------
 CONFIRM_PAT = re.compile(r"\b(confirm(ed)?|best(ae|ä)tigt)\b", re.I)
@@ -26,7 +31,7 @@ OPTION_PAT  = re.compile(r"\b(option|concept|konzept|tentative|pending)\b", re.I
 CANCEL_PAT  = re.compile(r"\b(cancel(l)?(ed)?|storniert|abgesagt)\b", re.I)
 
 def status_from_component(comp):
-    """Return (ical_status, label_for_title)."""
+    """Return ('CONFIRMED'|'TENTATIVE'|'CANCELLED', 'Confirmed'|'Pending'|'Cancelled')."""
     s = comp.get("status")
     if s:
         sval = str(s).strip().upper()
@@ -100,23 +105,29 @@ def usage_override(summary: str, desc: str, original_start, original_end):
             s_t = datetime.strptime(p.group(1), "%H:%M").time()
             e_t = datetime.strptime(p.group(2), "%H:%M").time()
             sd = original_start.date() if isinstance(original_start, datetime) else original_start
-            ed = original_end.date()   if isinstance(original_end,   datetime) else original_end
+            ed = original_end.date()   if isinstance(original_end, datetime) else original_end
             return TZ.localize(datetime.combine(sd, s_t)), TZ.localize(datetime.combine(ed, e_t))
     return None
 
-# --------- TRANSFORM ---------
+def new_calendar(name: str, apple_color_hex: str) -> Calendar:
+    cal = Calendar()
+    cal.add("prodid", "-//Rentman Split Calendar//")
+    cal.add("version", "2.0")
+    cal.add("method", "PUBLISH")
+    cal.add("x-wr-calname", name)
+    cal.add("x-wr-timezone", TZID)
+    # Non-standard color hint (Apple might show; Google ignores):
+    cal.add("x-apple-calendar-color", apple_color_hex)
+    return cal
+
 def main():
     print("📥 Downloading source ICS…")
     resp = requests.get(RENTMAN_ICAL_URL, timeout=30)
     resp.raise_for_status()
     src = Calendar.from_ical(resp.content)
 
-    out = Calendar()
-    out.add("prodid", "-//Rentman Usage Calendar (Transformed)//")
-    out.add("version", "2.0")
-    out.add("method", "PUBLISH")
-    out.add("x-wr-calname", "Rentman – Usage Periods")
-    out.add("x-wr-timezone", TZID)
+    cal_confirmed = new_calendar("Rentman – Confirmed", APPLE_GREEN)
+    cal_pending   = new_calendar("Rentman – Pending",   APPLE_YELLOW)
 
     changed_usage = 0
     now = datetime.now(timezone.utc)
@@ -160,11 +171,22 @@ def main():
         else:
             ev.add("description", f"Status: {label}\n\n{desc}".strip())
 
-        out.add_component(ev)
+        # Route to the correct calendar
+        if ical_status == "CONFIRMED":
+            cal_confirmed.add_component(ev)
+        elif ical_status == "CANCELLED":
+            # Skip cancelled; or add to a third feed if you like
+            continue
+        else:
+            # TENTATIVE and everything else -> pending feed
+            cal_pending.add_component(ev)
 
-    with open(OUTPUT_ICS, "wb") as f:
-        f.write(out.to_ical())
-    print(f"✅ Wrote {OUTPUT_ICS} (usage overrides applied to {changed_usage} events)")
+    with open(OUT_CONFIRMED, "wb") as f:
+        f.write(cal_confirmed.to_ical())
+    with open(OUT_PENDING, "wb") as f:
+        f.write(cal_pending.to_ical())
+
+    print(f"✅ Wrote {OUT_CONFIRMED} and {OUT_PENDING} (usage overrides on {changed_usage} events)")
 
 if __name__ == "__main__":
     main()
