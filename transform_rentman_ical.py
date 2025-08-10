@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Split Rentman Projects ICS into two calendars:
-# - Confirmed events  -> rentman_confirmed.ics
-# - Pending/Option    -> rentman_pending.ics
-# Also tries to override DTSTART/DTEND with "Usage" times when detectable.
+# One-calendar Rentman ICS:
+# - Keeps usage-time override when detectable
+# - Prefixes titles with 🟢/🟡 and [Confirmed]/[Pending]
+# - Sets STATUS and CATEGORIES accordingly
 
 import re
 import requests
@@ -17,13 +17,7 @@ RENTMAN_ICAL_URL = (
 )
 TZID = "America/Vancouver"
 TZ = pytz.timezone(TZID)
-
-OUT_CONFIRMED = "rentman_confirmed.ics"
-OUT_PENDING   = "rentman_pending.ics"
-
-# (Optional) calendar color hints – many apps ignore ICS color; set color in the app UI.
-APPLE_GREEN  = "#33CC33"
-APPLE_YELLOW = "#FFCC00"
+OUTPUT_ICS = "rentman_usage_calendar.ics"
 
 # --------- STATUS DETECTION ----------
 CONFIRM_PAT = re.compile(r"\b(confirm(ed)?|best(ae|ä)tigt)\b", re.I)
@@ -109,25 +103,18 @@ def usage_override(summary: str, desc: str, original_start, original_end):
             return TZ.localize(datetime.combine(sd, s_t)), TZ.localize(datetime.combine(ed, e_t))
     return None
 
-def new_calendar(name: str, apple_color_hex: str) -> Calendar:
-    cal = Calendar()
-    cal.add("prodid", "-//Rentman Split Calendar//")
-    cal.add("version", "2.0")
-    cal.add("method", "PUBLISH")
-    cal.add("x-wr-calname", name)
-    cal.add("x-wr-timezone", TZID)
-    # Non-standard color hint (Apple might show; Google ignores):
-    cal.add("x-apple-calendar-color", apple_color_hex)
-    return cal
-
 def main():
     print("📥 Downloading source ICS…")
     resp = requests.get(RENTMAN_ICAL_URL, timeout=30)
     resp.raise_for_status()
     src = Calendar.from_ical(resp.content)
 
-    cal_confirmed = new_calendar("Rentman – Confirmed", APPLE_GREEN)
-    cal_pending   = new_calendar("Rentman – Pending",   APPLE_YELLOW)
+    out = Calendar()
+    out.add("prodid", "-//Rentman Usage Calendar (One Feed)//")
+    out.add("version", "2.0")
+    out.add("method", "PUBLISH")
+    out.add("x-wr-calname", "Rentman – Usage (One Feed)")
+    out.add("x-wr-timezone", TZID)
 
     changed_usage = 0
     now = datetime.now(timezone.utc)
@@ -153,7 +140,10 @@ def main():
             changed_usage += 1
 
         ical_status, label = status_from_component(comp)
-        new_summary = f"[{label}] {summary}"
+
+        # Emoji badges for universal visual “color”
+        badge = "🟢" if ical_status == "CONFIRMED" else ("🟡" if ical_status == "TENTATIVE" else "⚫")
+        new_summary = f"{badge} [{label}] {summary}"
 
         ev = Event()
         ev.add("uid", str(comp.get("uid", "")))
@@ -164,6 +154,8 @@ def main():
         ev.add("last-modified", now)
         ev.add("status", ical_status)
         ev.add("transp", "OPAQUE")
+        # Categories can be used by Outlook rules; other clients ignore
+        ev.add("categories", label)
         if loc:
             ev.add("location", vText(loc))
         if "Status:" in desc:
@@ -171,22 +163,11 @@ def main():
         else:
             ev.add("description", f"Status: {label}\n\n{desc}".strip())
 
-        # Route to the correct calendar
-        if ical_status == "CONFIRMED":
-            cal_confirmed.add_component(ev)
-        elif ical_status == "CANCELLED":
-            # Skip cancelled; or add to a third feed if you like
-            continue
-        else:
-            # TENTATIVE and everything else -> pending feed
-            cal_pending.add_component(ev)
+        out.add_component(ev)
 
-    with open(OUT_CONFIRMED, "wb") as f:
-        f.write(cal_confirmed.to_ical())
-    with open(OUT_PENDING, "wb") as f:
-        f.write(cal_pending.to_ical())
-
-    print(f"✅ Wrote {OUT_CONFIRMED} and {OUT_PENDING} (usage overrides on {changed_usage} events)")
+    with open(OUTPUT_ICS, "wb") as f:
+        f.write(out.to_ical())
+    print(f"✅ Wrote {OUTPUT_ICS} (usage overrides on {changed_usage} events)")
 
 if __name__ == "__main__":
     main()
